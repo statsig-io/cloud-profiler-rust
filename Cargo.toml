@@ -3,6 +3,7 @@ name = "cloud_profiler_rust"
 version = "1.0.0"
 edition = "2021"
 license = "MIT"
+description = "Google Cloud Profiler Rust Agent"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
