@@ -61,7 +61,7 @@ where
     tokio::spawn(async move {
         // Define constants
         let mut labels = HashMap::new();
-        labels.insert("language".to_string(), "rust".to_string());
+        labels.insert("language".to_string(), "go".to_string());
         labels.insert("version".to_string(), version.clone());
         let deployment = Some(Deployment {
             project_id: Some("statsig-services".to_string()),
