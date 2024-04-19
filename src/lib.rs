@@ -81,7 +81,7 @@ where
             let token = match get_auth_token().await {
                 Ok(token) => token,
                 Err(e) => {
-                    eprintln!("[gcp cloud profiler] Error getting auth token: {:?}", e);
+                    println!("[gcp cloud profiler] Error getting auth token: {:?}", e);
                     return;
                 }
             };
@@ -103,7 +103,7 @@ where
                 Ok(profile) => profile,
                 Err(e) => {
                     // TODO: retry if creation fails with exponential backoff
-                    eprintln!("[gcp cloud profiler] Error creating profile: {:?}", e);
+                    println!("[gcp cloud profiler] Error creating profile: {:?}", e);
                     return;
                 }
             };
@@ -113,7 +113,7 @@ where
                     (d.num_milliseconds() as u32) * 1000,
                 ),
                 None => {
-                    eprintln!("[gcp cloud profiler] Profile missing duration...");
+                    println!("[gcp cloud profiler] Profile missing duration...");
                     continue;
                 }
             };
@@ -123,13 +123,13 @@ where
             let report = match do_profile(profile_duration).await {
                 Ok(report) => report,
                 Err(e) => {
-                    eprintln!("[gcp cloud profiler] Error profiling: {:?}", e);
+                    println!("[gcp cloud profiler] Error profiling: {:?}", e);
                     return;
                 }
             };
             // Send profiled data to GCP profiler server
             if let Err(e) = update_gcp_profile_server(&hub, report, profile).await {
-                eprintln!("[gcp cloud profiler] Error updating profile: {:?}", e);
+                println!("[gcp cloud profiler] Error updating profile: {:?}", e);
                 return;
             }
         }
