@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "cloud_profiler_rust"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "envy",
  "flate2",
