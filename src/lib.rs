@@ -76,30 +76,9 @@ where
                 continue;
             }
 
-            // Auth: Re-fetch auth token on every loop just incase we are
-            //       using GCP Metadata server to get the token.
-            let token = match get_auth_token().await {
-                Ok(token) => token,
-                Err(e) => {
-                    println!("[gcp cloud profiler] Error getting auth token: {:?}", e);
-                    return;
-                }
-            };
-            // Create client for communicating with GCP profiler server
-            let hub = CloudProfiler::new(
-                hyper::Client::builder().build(
-                    hyper_rustls::HttpsConnectorBuilder::new()
-                        .with_native_roots()
-                        .https_or_http()
-                        .enable_http1()
-                        .build(),
-                ),
-                token,
-            );
-
             // Make a request to GCP profiler server to generate
             // a new profile instance
-            let profile = match create_profile(&hub, &deployment).await {
+            let profile = match create_profile(&deployment).await {
                 Ok(profile) => profile,
                 Err(e) => {
                     // TODO: retry if creation fails with exponential backoff
@@ -128,12 +107,29 @@ where
                 }
             };
             // Send profiled data to GCP profiler server
-            if let Err(e) = update_gcp_profile_server(&hub, report, profile).await {
+            if let Err(e) = update_gcp_profile_server(report, profile).await {
                 println!("[gcp cloud profiler] Error updating profile: {:?}", e);
                 return;
             }
         }
     });
+}
+
+async fn get_hub() -> Result<CloudProfiler<HttpsConnector<HttpConnector>>, GcpCloudProfilingError> {
+    // Auth: Re-fetch auth token on every loop just incase we are
+    //       using GCP Metadata server to get the token.
+    let token = get_auth_token().await?;
+    // Create client for communicating with GCP profiler server
+    Ok(CloudProfiler::new(
+        hyper::Client::builder().build(
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_native_roots()
+                .https_or_http()
+                .enable_http1()
+                .build(),
+        ),
+        token,
+    ))
 }
 
 async fn get_auth_token() -> Result<String, GcpCloudProfilingError> {
@@ -155,14 +151,14 @@ async fn get_auth_token() -> Result<String, GcpCloudProfilingError> {
 }
 
 async fn create_profile(
-    hub: &CloudProfiler<HttpsConnector<HttpConnector>>,
     deployment: &Option<Deployment>,
 ) -> Result<Profile, GcpCloudProfilingError> {
     let request = CreateProfileRequest {
         deployment: deployment.clone(),
         profile_type: Some(vec!["Wall".to_string()]),
     };
-    match hub
+    match get_hub()
+        .await?
         .projects()
         .profiles_create(request, "projects/statsig-services")
         .doit()
@@ -190,7 +186,6 @@ async fn do_profile(profile_duration: Duration) -> Result<Report, GcpCloudProfil
 }
 
 async fn update_gcp_profile_server(
-    hub: &CloudProfiler<HttpsConnector<HttpConnector>>,
     report: Report,
     mut profile: Profile,
 ) -> Result<(), GcpCloudProfilingError> {
@@ -217,7 +212,13 @@ async fn update_gcp_profile_server(
                     ));
                 }
             };
-            if let Err(e) = hub.projects().profiles_patch(profile, &name).doit().await {
+            if let Err(e) = get_hub()
+                .await?
+                .projects()
+                .profiles_patch(profile, &name)
+                .doit()
+                .await
+            {
                 return Err(GcpCloudProfilingError::FailedToSendProfileToGCP(
                     e.to_string(),
                 ));
