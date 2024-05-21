@@ -1,3 +1,4 @@
+mod backoff;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use google_cloud_metadata::on_gce;
@@ -69,11 +70,20 @@ where
             labels: Some(labels),
         });
 
+        let mut backoff_provider = backoff::Backoff::new(60.0, 3600.0, 1.3);
+        let mut retry_back_off = None;
         loop {
             if !shared_should_start() {
                 // Sleep for 60 seconds
                 tokio::time::sleep(std::time::Duration::new(60, 0)).await;
                 continue;
+            }
+            if let Some(rbo) = retry_back_off {
+                println!("[gcp cloud profiler] Retrying in {:.3} seconds...", rbo);
+                tokio::time::sleep(std::time::Duration::from_secs_f64(rbo)).await;
+            } else {
+                // Reset backoff if we're succeeding
+                backoff_provider = backoff::Backoff::new(60.0, 3600.0, 1.3);
             }
 
             // Make a request to GCP profiler server to generate
@@ -81,9 +91,9 @@ where
             let profile = match create_profile(&deployment).await {
                 Ok(profile) => profile,
                 Err(e) => {
-                    // TODO: retry if creation fails with exponential backoff
                     println!("[gcp cloud profiler] Error creating profile: {:?}", e);
-                    return;
+                    retry_back_off = Some(backoff_provider.next_backoff());
+                    continue;
                 }
             };
             let profile_duration = match profile.duration {
@@ -93,6 +103,7 @@ where
                 ),
                 None => {
                     println!("[gcp cloud profiler] Profile missing duration...");
+                    retry_back_off = Some(backoff_provider.next_backoff());
                     continue;
                 }
             };
@@ -103,13 +114,15 @@ where
                 Ok(report) => report,
                 Err(e) => {
                     println!("[gcp cloud profiler] Error profiling: {:?}", e);
-                    return;
+                    retry_back_off = Some(backoff_provider.next_backoff());
+                    continue;
                 }
             };
             // Send profiled data to GCP profiler server
             if let Err(e) = update_gcp_profile_server(report, profile).await {
                 println!("[gcp cloud profiler] Error updating profile: {:?}", e);
-                return;
+                retry_back_off = Some(backoff_provider.next_backoff());
+                continue;
             }
         }
     });
