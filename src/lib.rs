@@ -84,6 +84,7 @@ where
             } else {
                 // Reset backoff if we're succeeding
                 backoff_provider = backoff::Backoff::new(60.0, 3600.0, 1.3);
+                retry_back_off = None;
             }
 
             // Make a request to GCP profiler server to generate
