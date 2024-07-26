@@ -138,6 +138,7 @@ async fn get_hub() -> Result<CloudProfiler<HttpsConnector<HttpConnector>>, GcpCl
         hyper::Client::builder().build(
             hyper_rustls::HttpsConnectorBuilder::new()
                 .with_native_roots()
+                .unwrap()
                 .https_or_http()
                 .enable_http1()
                 .build(),
