@@ -7,8 +7,8 @@ use google_cloudprofiler2::api::CreateProfileRequest;
 use google_cloudprofiler2::api::Deployment;
 use google_cloudprofiler2::api::Profile;
 use google_cloudprofiler2::hyper::client::HttpConnector;
-use google_cloudprofiler2::hyper_rustls::HttpsConnector;
-use google_cloudprofiler2::{hyper, hyper_rustls, CloudProfiler};
+use hyper_rustls::HttpsConnector;
+use google_cloudprofiler2::{hyper, CloudProfiler};
 use pprof::protos::Message;
 use pprof::Report;
 use std::collections::HashMap;
@@ -28,8 +28,6 @@ const SCOPES: [&str; 3] = [
 enum GcpCloudProfilingError {
     #[error("Failed to get auth token from gcp metadata server")]
     FailedToGetAuthToken(String),
-    #[error("Failed to connect to gcp profiler server")]
-    FailedToConnectToGCPProfilerServer(String),
     #[error("Failed to create new profile on gcp profiler server")]
     FailedToCreateProfile(String),
     #[error("Failed to profile current application")]
@@ -144,9 +142,6 @@ async fn get_hub() -> Result<CloudProfiler<HttpsConnector<HttpConnector>>, GcpCl
         hyper::Client::builder().build(
             hyper_rustls::HttpsConnectorBuilder::new()
                 .with_native_roots()
-                .map_err(|e| {
-                    GcpCloudProfilingError::FailedToConnectToGCPProfilerServer(e.to_string())
-                })?
                 .https_or_http()
                 .enable_http1()
                 .build(),

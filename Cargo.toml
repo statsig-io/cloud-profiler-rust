@@ -1,6 +1,6 @@
 [package]
 name = "cloud_profiler_rust"
-version = "1.1.5"
+version = "1.1.6"
 edition = "2021"
 license = "MIT"
 description = "Google Cloud Profiler Rust Agent"
@@ -12,7 +12,8 @@ keywords = ["pprof", "profiling", "gcp", "cloud"]
 
 [dependencies]
 pprof = { version="0.13.0", features = ["protobuf", "protobuf-codec"] }
-google-cloudprofiler2 = "5.0.4"
+google-cloudprofiler2 = "5.0.5"
+hyper-rustls = { version = "0.23.2", features = ["webpki-roots", "http2"] }
 serde = "1.0.197"
 serde_json = "1.0.115"
 envy = "0.4.2"
