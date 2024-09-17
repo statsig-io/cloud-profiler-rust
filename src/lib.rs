@@ -28,6 +28,8 @@ const SCOPES: [&str; 3] = [
 enum GcpCloudProfilingError {
     #[error("Failed to get auth token from gcp metadata server")]
     FailedToGetAuthToken(String),
+    #[error("Failed to connect to gcp profiler server")]
+    FailedToConnectToGCPProfilerServer(String),
     #[error("Failed to create new profile on gcp profiler server")]
     FailedToCreateProfile(String),
     #[error("Failed to profile current application")]
@@ -50,8 +52,12 @@ enum GcpCloudProfilingError {
 /// use cloud_profiler_rust;
 /// cloud_profiler_rust::maybe_start_profiling("my-gcp-project-id", "my-service", "v1", || { should_run_profiler() });
 /// ```
-pub async fn maybe_start_profiling<F>(project_id: String, service: String, version: String, should_start: F)
-where
+pub async fn maybe_start_profiling<F>(
+    project_id: String,
+    service: String,
+    version: String,
+    should_start: F,
+) where
     F: Fn() -> bool + Send + Sync + 'static,
 {
     if !on_gce().await {
@@ -138,7 +144,9 @@ async fn get_hub() -> Result<CloudProfiler<HttpsConnector<HttpConnector>>, GcpCl
         hyper::Client::builder().build(
             hyper_rustls::HttpsConnectorBuilder::new()
                 .with_native_roots()
-                .map_err(|e| GcpCloudProfilingError::FailedToCreateProfile(e.to_string()))?
+                .map_err(|e| {
+                    GcpCloudProfilingError::FailedToConnectToGCPProfilerServer(e.to_string())
+                })?
                 .https_or_http()
                 .enable_http1()
                 .build(),
