@@ -48,9 +48,9 @@ enum GcpCloudProfilingError {
 ///
 /// ```
 /// use cloud_profiler_rust;
-/// cloud_profiler_rust::maybe_start_profiling("my-service", "v1", || { should_run_profiler() });
+/// cloud_profiler_rust::maybe_start_profiling("my-gcp-project-id", "my-service", "v1", || { should_run_profiler() });
 /// ```
-pub async fn maybe_start_profiling<F>(service: String, version: String, should_start: F)
+pub async fn maybe_start_profiling<F>(project_id: String, service: String, version: String, should_start: F)
 where
     F: Fn() -> bool + Send + Sync + 'static,
 {
@@ -65,7 +65,7 @@ where
         labels.insert("language".to_string(), "go".to_string());
         labels.insert("version".to_string(), version.clone());
         let deployment = Some(Deployment {
-            project_id: Some("statsig-services".to_string()),
+            project_id: Some(project_id),
             target: Some(service.clone()),
             labels: Some(labels),
         });
