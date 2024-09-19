@@ -7,8 +7,8 @@ use google_cloudprofiler2::api::CreateProfileRequest;
 use google_cloudprofiler2::api::Deployment;
 use google_cloudprofiler2::api::Profile;
 use google_cloudprofiler2::hyper::client::HttpConnector;
-use hyper_rustls::HttpsConnector;
 use google_cloudprofiler2::{hyper, CloudProfiler};
+use hyper_rustls::HttpsConnector;
 use pprof::protos::Message;
 use pprof::Report;
 use std::collections::HashMap;
@@ -40,6 +40,10 @@ enum GcpCloudProfilingError {
     FailedToSendProfileToGCP(String),
 }
 
+pub struct CloudProfilerConfiguration {
+    sampling_rate: i32,
+}
+
 /// This is a best effort attempt to run the GCP profiler on a rust
 /// service. This is not officially supported by Google Cloud and
 /// can run the risk of breaking at some point.
@@ -50,19 +54,22 @@ enum GcpCloudProfilingError {
 /// use cloud_profiler_rust;
 /// cloud_profiler_rust::maybe_start_profiling("my-gcp-project-id", "my-service", "v1", || { should_run_profiler() });
 /// ```
-pub async fn maybe_start_profiling<F>(
+pub async fn maybe_start_profiling<F, G>(
     project_id: String,
     service: String,
     version: String,
     should_start: F,
+    get_configuration: G,
 ) where
     F: Fn() -> bool + Send + Sync + 'static,
+    G: Fn() -> CloudProfilerConfiguration + Send + Sync + 'static,
 {
     if !on_gce().await {
         return;
     }
 
     let shared_should_start = Arc::new(should_start);
+    let shared_get_configuration = Arc::new(get_configuration);
     tokio::spawn(async move {
         // Define constants
         let mut labels = HashMap::new();
@@ -115,7 +122,8 @@ pub async fn maybe_start_profiling<F>(
 
             // Profile application using pprof based on the duration
             // specified by the GCP profiler server
-            let report = match do_profile(profile_duration).await {
+            let configuration = shared_get_configuration();
+            let report = match do_profile(profile_duration, &configuration).await {
                 Ok(report) => report,
                 Err(e) => {
                     println!("[gcp cloud profiler] Error profiling: {:?}", e);
@@ -187,8 +195,12 @@ async fn create_profile(
     }
 }
 
-async fn do_profile(profile_duration: Duration) -> Result<Report, GcpCloudProfilingError> {
-    let guard = match pprof::ProfilerGuard::new(1000) {
+async fn do_profile(
+    profile_duration: Duration,
+    configuration: &CloudProfilerConfiguration,
+) -> Result<Report, GcpCloudProfilingError> {
+    let guard = match pprof::ProfilerGuard::new(configuration.sampling_rate) {
+        // Make sampling rate configurable
         Ok(guard) => guard,
         Err(e) => {
             return Err(GcpCloudProfilingError::FailedToProfileApplication(
