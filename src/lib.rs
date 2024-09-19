@@ -11,6 +11,8 @@ use google_cloudprofiler2::{hyper, CloudProfiler};
 use hyper_rustls::HttpsConnector;
 use pprof::protos::Message;
 use pprof::Report;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::default::Default;
 use std::io::Write;
@@ -40,6 +42,7 @@ enum GcpCloudProfilingError {
     FailedToSendProfileToGCP(String),
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct CloudProfilerConfiguration {
     pub sampling_rate: i32,
 }
