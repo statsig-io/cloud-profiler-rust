@@ -41,7 +41,7 @@ enum GcpCloudProfilingError {
 }
 
 pub struct CloudProfilerConfiguration {
-    sampling_rate: i32,
+    pub sampling_rate: i32,
 }
 
 /// This is a best effort attempt to run the GCP profiler on a rust
