@@ -24,3 +24,8 @@ google-cloud-token = "0.1.2"
 google-cloud-metadata = "0.5.0"
 thiserror = "1.0.58"
 rand = "0.8.5"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
+tikv-jemalloc-sys = { version = "0.6", features = ["profiling"] }
+jemalloc_pprof = "0.8.1"

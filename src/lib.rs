@@ -15,10 +15,25 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::default::Default;
+
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
+// Configure jemalloc for heap profiling
+// Based on rust-jemalloc-pprof recommended settings
+#[cfg(not(target_env = "msvc"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 const SCOPES: [&str; 3] = [
     "https://www.googleapis.com/auth/cloud-platform",
@@ -40,11 +55,22 @@ enum GcpCloudProfilingError {
     FailedToSerializeProfile(String),
     #[error("Failed to send profile data for transmitting to GCP")]
     FailedToSendProfileToGCP(String),
+    #[error("Failed to enable jemalloc heap profiling")]
+    FailedToEnableHeapProfiling(String),
+    #[error("Failed to dump jemalloc heap profile")]
+    FailedToDumpHeapProfile(String),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
+pub enum ProfileType {
+    CPU,
+    Heap,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CloudProfilerConfiguration {
     pub sampling_rate: i32,
+    pub heap_profile_active: bool,
 }
 
 /// This is a best effort attempt to run the GCP profiler on a rust
@@ -101,44 +127,77 @@ pub async fn maybe_start_profiling<F, G>(
                 retry_back_off = None;
             }
 
-            // Make a request to GCP profiler server to generate
-            // a new profile instance
-            let profile = match create_profile(&deployment).await {
+            let configuration = shared_get_configuration();
+            
+            // Always do CPU profiling
+            let cpu_profile = match create_profile(&deployment, &ProfileType::CPU).await {
                 Ok(profile) => profile,
                 Err(e) => {
-                    println!("[gcp cloud profiler] Error creating profile: {:?}", e);
+                    println!("[gcp cloud profiler] Error creating CPU profile: {:?}", e);
                     retry_back_off = Some(backoff_provider.next_backoff());
                     continue;
                 }
             };
-            let profile_duration = match profile.duration {
+            let cpu_profile_duration = match cpu_profile.duration {
                 Some(d) => std::time::Duration::new(
                     d.num_seconds() as u64,
                     (d.num_milliseconds() as u32) * 1000,
                 ),
                 None => {
-                    println!("[gcp cloud profiler] Profile missing duration...");
+                    println!("[gcp cloud profiler] CPU profile missing duration...");
                     retry_back_off = Some(backoff_provider.next_backoff());
                     continue;
                 }
             };
 
-            // Profile application using pprof based on the duration
-            // specified by the GCP profiler server
-            let configuration = shared_get_configuration();
-            let report = match do_profile(profile_duration, &configuration).await {
-                Ok(report) => report,
+            // Do CPU profiling
+            let cpu_profile_data = match do_cpu_profile(cpu_profile_duration, &configuration).await {
+                Ok(report) => ProfileData::CPU(report),
                 Err(e) => {
-                    println!("[gcp cloud profiler] Error profiling: {:?}", e);
+                    println!("[gcp cloud profiler] Error CPU profiling: {:?}", e);
                     retry_back_off = Some(backoff_provider.next_backoff());
                     continue;
                 }
             };
-            // Send profiled data to GCP profiler server
-            if let Err(e) = update_gcp_profile_server(report, profile).await {
-                println!("[gcp cloud profiler] Error updating profile: {:?}", e);
+            
+            // Send CPU profile data to GCP
+            if let Err(e) = update_gcp_profile_server(cpu_profile_data, cpu_profile).await {
+                println!("[gcp cloud profiler] Error updating CPU profile: {:?}", e);
                 retry_back_off = Some(backoff_provider.next_backoff());
                 continue;
+            }
+
+            if configuration.heap_profile_active {
+                let heap_profile = match create_profile(&deployment, &ProfileType::Heap).await {
+                    Ok(profile) => profile,
+                    Err(e) => {
+                        println!("[gcp cloud profiler] Error creating heap profile: {:?}", e);
+                        continue;
+                    }
+                };
+                let heap_profile_duration = match heap_profile.duration {
+                    Some(d) => std::time::Duration::new(
+                        d.num_seconds() as u64,
+                        (d.num_milliseconds() as u32) * 1000,
+                    ),
+                    None => {
+                        println!("[gcp cloud profiler] Heap profile missing duration...");
+                        continue;
+                    }
+                };
+
+                let heap_profile_data = match do_heap_profile_raw(heap_profile_duration, &configuration).await {
+                    Ok(pprof_data) => ProfileData::Heap(pprof_data),
+                    Err(e) => {
+                        println!("[gcp cloud profiler] Error heap profiling: {:?}", e);
+                        continue;
+                    }
+                };
+                
+                if let Err(e) = update_gcp_profile_server(heap_profile_data, heap_profile).await {
+                    println!("[gcp cloud profiler] Error updating heap profile: {:?}", e);
+                    // Don't fail the entire loop for heap profiling errors
+                }
             }
         }
     });
@@ -181,10 +240,16 @@ async fn get_auth_token() -> Result<String, GcpCloudProfilingError> {
 
 async fn create_profile(
     deployment: &Option<Deployment>,
+    profile_type: &ProfileType,
 ) -> Result<Profile, GcpCloudProfilingError> {
+    let profile_type_str = match profile_type {
+        ProfileType::CPU => "CPU",
+        ProfileType::Heap => "HEAP",
+    };
+    
     let request = CreateProfileRequest {
         deployment: deployment.clone(),
-        profile_type: Some(vec!["Wall".to_string()]),
+        profile_type: Some(vec![profile_type_str.to_string()]),
     };
     match get_hub()
         .await?
@@ -198,12 +263,18 @@ async fn create_profile(
     }
 }
 
-async fn do_profile(
+
+
+enum ProfileData {
+    CPU(Report),
+    Heap(Vec<u8>),
+}
+
+async fn do_cpu_profile(
     profile_duration: Duration,
     configuration: &CloudProfilerConfiguration,
 ) -> Result<Report, GcpCloudProfilingError> {
     let guard = match pprof::ProfilerGuard::new(configuration.sampling_rate) {
-        // Make sampling rate configurable
         Ok(guard) => guard,
         Err(e) => {
             return Err(GcpCloudProfilingError::FailedToProfileApplication(
@@ -218,51 +289,153 @@ async fn do_profile(
         .map_err(|e| GcpCloudProfilingError::FailedToBuildReport(e.to_string()))
 }
 
+async fn do_heap_profile_raw(
+    profile_duration: Duration,
+    configuration: &CloudProfilerConfiguration,
+) -> Result<Vec<u8>, GcpCloudProfilingError> {
+    if configuration.heap_profile_active {
+        jemalloc_profiling::set_prof_active(true)?;
+    }
+
+    tokio::time::sleep(profile_duration).await;
+
+    // pprof in protobuf
+    let pprof_data = jemalloc_profiling::dump_heap_profile()?;
+
+    // Disable heap profiling if it was enabled
+    if configuration.heap_profile_active {
+        jemalloc_profiling::set_prof_active(false)?;
+    }
+
+    Ok(pprof_data)
+}
+
+
+
 async fn update_gcp_profile_server(
-    report: Report,
+    profile_data: ProfileData,
     mut profile: Profile,
 ) -> Result<(), GcpCloudProfilingError> {
-    match report.pprof() {
-        Ok(pprof_data) => {
-            // Gzip the data before sending it to GCP
-            let mut content = Vec::new();
-            if let Err(e) = pprof_data.write_to_vec(&mut content) {
-                return Err(GcpCloudProfilingError::FailedToSerializeProfile(
-                    e.to_string(),
-                ));
-            }
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&content).unwrap();
-            let compressed_content = encoder.finish().unwrap();
-
-            // Send profile data to GCP
-            profile.profile_bytes = Some(compressed_content);
-            let name = match profile.name.clone() {
-                Some(name) => name,
-                None => {
+    let content = match profile_data {
+        ProfileData::CPU(report) => {
+            match report.pprof() {
+                Ok(pprof_data) => {
+                    let mut content = Vec::new();
+                    if let Err(e) = pprof_data.write_to_vec(&mut content) {
+                        return Err(GcpCloudProfilingError::FailedToSerializeProfile(
+                            e.to_string(),
+                        ));
+                    }
+                    content
+                }
+                Err(e) => {
                     return Err(GcpCloudProfilingError::FailedToSerializeProfile(
-                        "GCP profile did not contain a name...".to_string(),
+                        e.to_string(),
                     ));
                 }
-            };
-            if let Err(e) = get_hub()
-                .await?
-                .projects()
-                .profiles_patch(profile, &name)
-                .doit()
-                .await
-            {
-                return Err(GcpCloudProfilingError::FailedToSendProfileToGCP(
-                    e.to_string(),
-                ));
             }
         }
-        Err(e) => {
+        ProfileData::Heap(pprof_data) => {
+            pprof_data
+        }
+    };
+
+    // Gzip the data before sending it to GCP
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&content).unwrap();
+    let compressed_content = encoder.finish().unwrap();
+
+    // Send profile data to GCP
+    profile.profile_bytes = Some(compressed_content);
+    let name = match profile.name.clone() {
+        Some(name) => name,
+        None => {
             return Err(GcpCloudProfilingError::FailedToSerializeProfile(
-                e.to_string(),
+                "GCP profile did not contain a name...".to_string(),
             ));
         }
+    };
+    if let Err(e) = get_hub()
+        .await?
+        .projects()
+        .profiles_patch(profile, &name)
+        .doit()
+        .await
+    {
+        return Err(GcpCloudProfilingError::FailedToSendProfileToGCP(
+            e.to_string(),
+        ));
     }
 
     Ok(())
+}
+
+#[cfg(not(target_env = "msvc"))]
+mod jemalloc_profiling {
+    use super::GcpCloudProfilingError;
+
+    pub fn set_prof_active(active: bool) -> Result<(), GcpCloudProfilingError> {
+        use jemalloc_pprof::PROF_CTL;
+        
+        if let Some(prof_ctl_ref) = PROF_CTL.as_ref() {
+            let mut prof_ctl = prof_ctl_ref.try_lock().map_err(|e| {
+                GcpCloudProfilingError::FailedToEnableHeapProfiling(format!(
+                    "Failed to lock profiler control: {}",
+                    e
+                ))
+            })?;
+            
+            if active {
+                prof_ctl.activate().map_err(|e| {
+                    GcpCloudProfilingError::FailedToEnableHeapProfiling(format!(
+                        "Failed to activate profiling: {}",
+                        e
+                    ))
+                })?;
+            } else {
+                prof_ctl.deactivate().map_err(|e| {
+                    GcpCloudProfilingError::FailedToEnableHeapProfiling(format!(
+                        "Failed to deactivate profiling: {}",
+                        e
+                    ))
+                })?;
+            }
+            
+            Ok(())
+        } else {
+            Err(GcpCloudProfilingError::FailedToEnableHeapProfiling(
+                "Profiler control not initialized".to_string(),
+            ))
+        }
+    }
+
+    pub fn dump_heap_profile() -> Result<Vec<u8>, GcpCloudProfilingError> {
+        use jemalloc_pprof::PROF_CTL;
+        
+        if let Some(prof_ctl_ref) = PROF_CTL.as_ref() {
+            let mut prof_ctl = prof_ctl_ref.try_lock().map_err(|e| {
+                GcpCloudProfilingError::FailedToDumpHeapProfile(format!(
+                    "Failed to lock profiler control: {}",
+                    e
+                ))
+            })?;
+            
+            if !prof_ctl.activated() {
+                return Err(GcpCloudProfilingError::FailedToDumpHeapProfile(
+                    "Heap profiling is not activated".to_string()
+                ));
+            }
+            
+            prof_ctl.dump_pprof().map_err(|e| {
+                GcpCloudProfilingError::FailedToDumpHeapProfile(format!(
+                    "Failed to dump heap profile: {}",
+                    e
+                ))
+            })
+        } else {
+            Err(GcpCloudProfilingError::FailedToDumpHeapProfile(
+                "Profiler control not initialized".to_string(),
+            ))
+        }
+    }
 }

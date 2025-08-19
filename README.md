@@ -14,19 +14,43 @@ That being said, it seems to work as long as you don't give away the fact that w
 
 https://github.com/statsig-io/cloud-profiler-rust/blob/main/src/lib.rs#L64
 
+## Features
+
+This library now supports both **CPU profiling** and **Heap profiling** using jemalloc:
+
+- **CPU Profiling**: Traditional CPU sampling profiling using the `pprof` crate
+- **Heap Profiling**: Complete memory allocation profiling using `tikv-jemalloc`
+  
+For more details on how heap profiling works internally, see the [rust-jemalloc-pprof](https://github.com/polarsignals/rust-jemalloc-pprof) documentation.
+
+## Configuring Heap Profiling Behavior
+
+Users can override the default jemalloc configuration using environment variables if needed:
+
+```bash
+export MALLOC_CONF="prof:true,prof_active:false,lg_prof_sample:21"
+```
+
 # Usage
 
-Using this library is extremely straight forward, this is an example from our [forward proxy](https://github.com/statsig-io/statsig-forward-proxy/tree/main), that uses
-both a static enablement and dynamic enablement method:
+## Basic Usage
 
-```
+The cloud profiler will **always perform CPU profiling** when enabled. You can optionally enable heap profiling as well.
+
+```rust
+use cloud_profiler_rust::CloudProfilerConfiguration;
+
 cloud_profiler_rust::maybe_start_profiling(
-        "statsig-forward-proxy".to_string(),
-        std::env::var("DD_VERSION").unwrap_or("missing_dd_version".to_string()),
-        move || {
-            force_enable
-                || Statsig::check_gate(&statsig_user, "enable_gcp_profiler_for_sfp").unwrap_or(false)
-        },
-    )
-    .await;
+    "my-project-id".to_string(),
+    "my-service".to_string(), 
+    "v1.0.0".to_string(),
+    move || {
+        force_enable
+            || Statsig::check_gate(&statsig_user, "enable_gcp_profiler").unwrap_or(false)
+    },
+    move || CloudProfilerConfiguration {
+        sampling_rate: 100,
+        heap_profile_active: true, // Enable heap profiling
+    }
+).await;
 ```
